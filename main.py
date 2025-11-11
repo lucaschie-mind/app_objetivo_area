@@ -1,36 +1,59 @@
-import streamlit as st
-import pandas as pd
-from sqlalchemy import create_engine, text
 import os
+import pandas as pd
+import streamlit as st
 
 st.set_page_config(page_title="Gestão de Áreas e Objetivos", layout="wide")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://usuario:senha@host:porta/dbname")
-engine = create_engine(DATABASE_URL)
+# tenta criar o engine só quando precisar
+def get_engine():
+    from sqlalchemy import create_engine
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        return None
+    try:
+        engine = create_engine(db_url)
+        return engine
+    except Exception as e:
+        st.error(f"Erro ao criar engine do banco: {e}")
+        return None
 
-def carregar_dados():
-    query = "SELECT * FROM areas_objetivos ORDER BY id;"
-    return pd.read_sql(query, engine)
+def carregar_dados(engine):
+    from sqlalchemy import text
+    try:
+        query = "SELECT * FROM areas_objetivos ORDER BY id;"
+        return pd.read_sql(query, engine)
+    except Exception as e:
+        st.error(f"Erro ao carregar dados da tabela 'areas_objetivos': {e}")
+        return pd.DataFrame()
 
-def atualizar_campo(id_, campo, valor):
+def atualizar_campo(engine, id_, campo, valor):
+    from sqlalchemy import text
     sql = text(f"UPDATE areas_objetivos SET {campo} = :valor WHERE id = :id")
     with engine.begin() as conn:
         conn.execute(sql, {"valor": valor, "id": id_})
 
 st.title("📋 Edição de Áreas e Objetivos")
-st.caption("Gerencie responsáveis, objetivos e períodos diretamente no banco do Railway.")
 
-df = carregar_dados()
-if df.empty:
-    st.warning("Nenhum registro encontrado na tabela 'areas_objetivos'.")
+engine = get_engine()
+if engine is None:
+    st.error("DATABASE_URL não configurada ou conexão não pôde ser criada. Configure no Railway.")
     st.stop()
 
+df = carregar_dados(engine)
+
+if df.empty:
+    st.warning("Não há dados ou a tabela 'areas_objetivos' não existe nesse banco.")
+    st.stop()
+
+# garantir colunas editáveis
 edit_cols = ["responsavel", "objetivo", "periodo_inicio", "periodo_fim"]
-df_editable = df.copy()
+for c in edit_cols:
+    if c not in df.columns:
+        df[c] = None
 
 st.write("### Editar informações")
 edited_df = st.data_editor(
-    df_editable,
+    df,
     column_config={
         "responsavel": st.column_config.TextColumn("Responsável"),
         "objetivo": st.column_config.TextColumn("Objetivo"),
@@ -44,21 +67,23 @@ edited_df = st.data_editor(
 
 if st.button("💾 Salvar alterações"):
     alteracoes = 0
-    for idx, row in edited_df.iterrows():
+    for _, row in edited_df.iterrows():
         orig = df.loc[df["id"] == row["id"]].iloc[0]
         for campo in edit_cols:
             novo = row[campo]
             antigo = orig[campo]
-            if pd.isna(novo) and pd.isna(antigo):
-                continue
+            # normalizar NaN/NaT -> None
+            if pd.isna(novo):
+                novo = None
+            if pd.isna(antigo):
+                antigo = None
             if novo != antigo:
-                atualizar_campo(row["id"], campo, novo)
+                atualizar_campo(engine, row["id"], campo, novo)
                 alteracoes += 1
-
-    if alteracoes > 0:
-        st.success(f"✅ {alteracoes} alteração(ões) salva(s) com sucesso!")
+    if alteracoes:
+        st.success(f"✅ {alteracoes} alteração(ões) salva(s)!")
     else:
         st.info("Nenhuma modificação detectada.")
 
-if st.button("🔄 Recarregar tabela"):
+if st.button("🔄 Recarregar"):
     st.experimental_rerun()
